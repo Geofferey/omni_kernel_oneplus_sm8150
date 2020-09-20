@@ -8023,9 +8023,9 @@ QDF_STATUS lim_send_he_caps_ie(tpAniSirGlobal mac_ctx,
 	uint8_t he_caps[SIR_MAC_HE_CAP_MIN_LEN + 3];
 	struct he_capability_info *he_cap;
 	QDF_STATUS status_5g, status_2g;
-	uint8_t he_cap_total_len = SIR_MAC_HE_CAP_MIN_LEN + HE_CAP_OUI_LEN +
+	/*uint8_t he_cap_total_len = SIR_MAC_HE_CAP_MIN_LEN + HE_CAP_OUI_LEN +
 				   HE_CAP_160M_MCS_MAP_LEN +
-				   HE_CAP_80P80_MCS_MAP_LEN;
+				   HE_CAP_80P80_MCS_MAP_LEN;*/
 
 	/* Sending only minimal info(no PPET) to FW now, update if required */
 	qdf_mem_zero(he_caps, SIR_MAC_HE_CAP_MIN_LEN + 3);
