@@ -484,13 +484,13 @@ static inline void *restore_red_left(struct kmem_cache *s, void *p)
  * Debug settings:
  */
 #if defined(CONFIG_SLUB_DEBUG_ON)
-static int slub_debug = DEBUG_DEFAULT_FLAGS;
+static int slub_debug __ro_after_init = DEBUG_DEFAULT_FLAGS;
 #else
-static int slub_debug;
+static int slub_debug __ro_after_init;
 #endif
 
-static char *slub_debug_slabs;
-static int disable_higher_order_debug;
+static char *slub_debug_slabs __ro_after_init;
+static int disable_higher_order_debug __ro_after_init;
 
 /*
  * slub is about to manipulate internal object metadata.  This memory lies
@@ -2979,11 +2979,13 @@ redo:
 	barrier();
 
 	if (likely(page == c->page)) {
-		set_freepointer(s, tail_obj, c->freelist);
+		void **freelist = READ_ONCE(c->freelist);
+
+		set_freepointer(s, tail_obj, freelist);
 
 		if (unlikely(!this_cpu_cmpxchg_double(
 				s->cpu_slab->freelist, s->cpu_slab->tid,
-				c->freelist, tid,
+				freelist, tid,
 				head, next_tid(tid)))) {
 
 			note_cmpxchg_failure("slab_free", s, tid);
@@ -3159,6 +3161,15 @@ int kmem_cache_alloc_bulk(struct kmem_cache *s, gfp_t flags, size_t size,
 
 		if (unlikely(!object)) {
 			/*
+			 * We may have removed an object from c->freelist using
+			 * the fastpath in the previous iteration; in that case,
+			 * c->tid has not been bumped yet.
+			 * Since ___slab_alloc() may reenable interrupts while
+			 * allocating memory, we should bump c->tid now.
+			 */
+			c->tid = next_tid(c->tid);
+
+			/*
 			 * Invoking slow path likely have side-effect
 			 * of re-populating per CPU c->freelist
 			 */
@@ -3215,9 +3226,9 @@ EXPORT_SYMBOL(kmem_cache_alloc_bulk);
  * and increases the number of allocations possible without having to
  * take the list_lock.
  */
-static int slub_min_order;
-static int slub_max_order = PAGE_ALLOC_COSTLY_ORDER;
-static int slub_min_objects;
+static int slub_min_order __ro_after_init;
+static int slub_max_order __ro_after_init = PAGE_ALLOC_COSTLY_ORDER;
+static int slub_min_objects __ro_after_init;
 
 /*
  * Calculate the order of allocation given an slab object size.
@@ -3895,7 +3906,11 @@ static size_t __ksize(const void *object)
 	page = virt_to_head_page(object);
 
 	if (unlikely(!PageSlab(page))) {
+#ifdef CONFIG_PANIC_ON_DATA_CORRUPTION
+		BUG_ON(!PageCompound(page));
+#else
 		WARN_ON(!PageCompound(page));
+#endif
 		return PAGE_SIZE << compound_order(page);
 	}
 
@@ -4761,7 +4776,7 @@ enum slab_stat_type {
 #define SO_TOTAL	(1 << SL_TOTAL)
 
 #ifdef CONFIG_MEMCG
-static bool memcg_sysfs_enabled = IS_ENABLED(CONFIG_SLUB_MEMCG_SYSFS_ON);
+static bool memcg_sysfs_enabled __ro_after_init = IS_ENABLED(CONFIG_SLUB_MEMCG_SYSFS_ON);
 
 static int __init setup_slub_memcg_sysfs(char *str)
 {

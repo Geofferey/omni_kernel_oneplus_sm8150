@@ -1251,6 +1251,30 @@ static int check_ptr_alignment(struct bpf_verifier_env *env,
 	return check_generic_ptr_alignment(reg, pointer_desc, off, size, strict);
 }
 
+static int check_ctx_reg(struct bpf_verifier_env *env,
+			 const struct bpf_reg_state *reg, int regno)
+{
+	/* Access to ctx or passing it to a helper is only allowed in
+	 * its original, unmodified form.
+	 */
+
+	if (reg->off) {
+		verbose("dereference of modified ctx ptr R%d off=%d disallowed\n",
+			regno, reg->off);
+		return -EACCES;
+	}
+
+	if (!tnum_is_const(reg->var_off) || reg->var_off.value) {
+		char tn_buf[48];
+
+		tnum_strn(tn_buf, sizeof(tn_buf), reg->var_off);
+		verbose("variable ctx access var_off=%s disallowed\n", tn_buf);
+		return -EACCES;
+	}
+
+	return 0;
+}
+
 /* truncate register to smaller size (in bytes)
  * must be called with size < BPF_REG_SIZE
  */
@@ -1320,22 +1344,10 @@ static int check_mem_access(struct bpf_verifier_env *env, int insn_idx, u32 regn
 			verbose("R%d leaks addr into ctx\n", value_regno);
 			return -EACCES;
 		}
-		/* ctx accesses must be at a fixed offset, so that we can
-		 * determine what type of data were returned.
-		 */
-		if (reg->off) {
-			verbose("dereference of modified ctx ptr R%d off=%d+%d, ctx+const is allowed, ctx+const+const is not\n",
-				regno, reg->off, off - reg->off);
-			return -EACCES;
-		}
-		if (!tnum_is_const(reg->var_off) || reg->var_off.value) {
-			char tn_buf[48];
+		err = check_ctx_reg(env, reg, regno);
+		if (err < 0)
+			return err;
 
-			tnum_strn(tn_buf, sizeof(tn_buf), reg->var_off);
-			verbose("variable ctx access var_off=%s off=%d size=%d",
-				tn_buf, off, size);
-			return -EACCES;
-		}
 		err = check_ctx_access(env, insn_idx, off, size, t, &reg_type);
 		if (!err && t == BPF_READ && value_regno >= 0) {
 			/* ctx access returns either a scalar, or a
@@ -1573,6 +1585,9 @@ static int check_func_arg(struct bpf_verifier_env *env, u32 regno,
 		expected_type = PTR_TO_CTX;
 		if (type != expected_type)
 			goto err_type;
+		err = check_ctx_reg(env, reg, regno);
+		if (err < 0)
+			return err;
 	} else if (arg_type == ARG_PTR_TO_MEM ||
 		   arg_type == ARG_PTR_TO_UNINIT_MEM) {
 		expected_type = PTR_TO_STACK;
@@ -2020,13 +2035,13 @@ static int retrieve_ptr_limit(const struct bpf_reg_state *ptr_reg,
 	case PTR_TO_STACK:
 		off = ptr_reg->off + ptr_reg->var_off.value;
 		if (mask_to_left)
-			*ptr_limit = MAX_BPF_STACK + off;
+			*ptr_limit = MAX_BPF_STACK + off + 1;
 		else
 			*ptr_limit = -off;
 		return 0;
 	case PTR_TO_MAP_VALUE:
 		if (mask_to_left) {
-			*ptr_limit = ptr_reg->umax_value + ptr_reg->off;
+			*ptr_limit = ptr_reg->umax_value + ptr_reg->off + 1;
 		} else {
 			off = ptr_reg->smin_value + ptr_reg->off;
 			*ptr_limit = ptr_reg->map_ptr->value_size - off;
@@ -2084,6 +2099,7 @@ static int sanitize_ptr_alu(struct bpf_verifier_env *env,
 	u32 alu_state, alu_limit;
 	struct bpf_reg_state tmp;
 	bool ret;
+	int err;
 
 	if (can_skip_alu_sanitation(env, insn))
 		return 0;
@@ -2099,10 +2115,13 @@ static int sanitize_ptr_alu(struct bpf_verifier_env *env,
 	alu_state |= ptr_is_dst_reg ?
 		     BPF_ALU_SANITIZE_SRC : BPF_ALU_SANITIZE_DST;
 
-	if (retrieve_ptr_limit(ptr_reg, &alu_limit, opcode, off_is_neg))
-		return 0;
-	if (update_alu_sanitation_state(aux, alu_state, alu_limit))
-		return -EACCES;
+	err = retrieve_ptr_limit(ptr_reg, &alu_limit, opcode, off_is_neg);
+	if (err < 0)
+		return err;
+
+	err = update_alu_sanitation_state(aux, alu_state, alu_limit);
+	if (err < 0)
+		return err;
 do_sim:
 	/* Simulate and find potential out-of-bounds access under
 	 * speculative execution from truncation as a result of
@@ -2195,7 +2214,7 @@ static int adjust_ptr_min_max_vals(struct bpf_verifier_env *env,
 	case BPF_ADD:
 		ret = sanitize_ptr_alu(env, insn, ptr_reg, dst_reg, smin_val < 0);
 		if (ret < 0) {
-			verbose("R%d tried to add from different maps or paths\n", dst);
+			verbose("R%d tried to add from different maps, paths, or prohibited types\n", dst);
 			return ret;
 		}
 		/* We can take a fixed offset as long as it doesn't overflow
@@ -2250,7 +2269,7 @@ static int adjust_ptr_min_max_vals(struct bpf_verifier_env *env,
 	case BPF_SUB:
 		ret = sanitize_ptr_alu(env, insn, ptr_reg, dst_reg, smin_val < 0);
 		if (ret < 0) {
-			verbose("R%d tried to sub from different maps or paths\n", dst);
+			verbose("R%d tried to sub from different maps, paths, or prohibited types\n", dst);
 			return ret;
 		}
 		if (dst_reg == off_reg) {
